@@ -1,61 +1,51 @@
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score
-from joblib import dump, load
 from pathlib import Path
-import json
+from joblib import dump, load
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.svm import SVC
+from sklearn.pipeline import Pipeline
 from tira.rest_api_client import Client
 from tira.third_party_integrations import get_output_directory
 
-# Load data using TIRA API
-tira = Client()
-train_texts, train_labels = tira.pd.inputs(
-    "nlpbuw-fsu-sose-24", "authorship-verification-train-20240408-training"
-), tira.pd.truths(
-    "nlpbuw-fsu-sose-24", "authorship-verification-train-20240408-training"
-)
+# Training
+if __name__ == "__main__":
 
-val_texts, val_labels = tira.pd.inputs(
-    "nlpbuw-fsu-sose-24", "authorship-verification-validation-20240408-training"
-), tira.pd.truths(
-    "nlpbuw-fsu-sose-24", "authorship-verification-validation-20240408-training"
-)
+    # Load the data
+    tira = Client()
+    text = tira.pd.inputs(
+        "nlpbuw-fsu-sose-24", "authorship-verification-train-20240408-training"
+    )
+    text = text.set_index("id")
+    labels = tira.pd.truths(
+        "nlpbuw-fsu-sose-24", "authorship-verification-train-20240408-training"
+    )
+    df = text.join(labels.set_index("id"))
 
-test_texts = tira.pd.inputs(
-    "nlpbuw-fsu-sose-24", "authorship-verification-test-20240408-testing"
-)
+    # Train the model
+    model = Pipeline(
+        [("vectorizer", TfidfVectorizer()), ("classifier", SVC(probability=True))]
+    )
+    model.fit(df["text"], df["generated"])
 
-# Preprocess data
-tfidf_vectorizer = TfidfVectorizer(max_features=1000)
-X_train = tfidf_vectorizer.fit_transform(train_texts['text'])
-y_train = train_labels['generated']
+    # Save the model
+    dump(model, Path(__file__).parent / "model.joblib")
 
-X_val = tfidf_vectorizer.transform(val_texts['text'])
-y_val = val_labels['generated']
+# Prediction
+if __name__ == "__main__":
 
-X_test = tfidf_vectorizer.transform(test_texts['text'])
+    # Load the data
+    tira = Client()
+    df = tira.pd.inputs(
+        "nlpbuw-fsu-sose-24", f"authorship-verification-validation-20240408-training"
+    )
 
-# Train model
-model = LogisticRegression()
-model.fit(X_train, y_train)
+    # Load the model and make predictions
+    model = load(Path(__file__).parent / "model.joblib")
+    predictions = model.predict(df["text"])
+    df["generated"] = predictions
+    df = df[["id", "generated"]]
 
-# Validate model
-val_predictions = model.predict(X_val)
-val_accuracy = accuracy_score(y_val, val_predictions)
-print(f"Validation accuracy: {val_accuracy}")
-
-# Test model and output predictions
-test_predictions = model.predict(X_test)
-
-# Save predictions in the required JSONL format
-output_directory = get_output_directory(str(Path(__file__).parent))
-output_path = Path(output_directory) / "predictions.jsonl"
-
-with open(output_path, 'w') as f:
-    for i, prediction in enumerate(test_predictions):
-        prediction_entry = {'id': test_texts['id'][i], 'generated': int(prediction)}
-        json.dump(prediction_entry, f)
-        f.write("\n")
-
-# Save the trained model for future use
-dump(model, 'model.joblib')
+    # Save the predictions
+    output_directory = get_output_directory(str(Path(__file__).parent))
+    df.to_json(
+        Path(output_directory) / "predictions.jsonl", orient="records", lines=True
+    )
